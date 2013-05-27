@@ -1,15 +1,49 @@
 /**
  * Module dependencies.
  */
-
+process.env.debug = 'time';
 var debug = require('debug')('time')
   , fs = require('fs')
+  , async = require('async')
   , path = require('path')
   , bindings = require('bindings')('time.node')
   , MILLIS_PER_SECOND = 1000
   , DAYS_OF_WEEK = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
   , MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
   , TZ_BLACKLIST = [ 'SystemV', 'Etc' ];
+
+if (process.platform === 'win32') {
+  var Winreg = require('winreg')
+    , regKey = new Winreg({
+        hive: Winreg.HKLM,
+        key:  '\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Time Zones'
+      });
+
+  var tzs = [];
+
+  regKey.keys(function(err, keys) {
+    async.forEach(
+      keys,
+      function readRegistryKeyValues(key, cb) {
+        key.values(function(err, items) {
+          items.every(function(item) {
+            if (item.name == 'Display') {
+              // console.log('ITEM: '+items[i].name+'\t'+items[i].type+'\t'+items[i].value);
+              tzs.push(item.value);
+              process.nextTick(cb);
+              return false;
+            }
+            
+            return true;
+          });
+        });
+      },
+      function readRegistryKeysDone(err) {
+        // console.dir(tzs);
+      }
+    )
+  });
+}
 
 /**
  * Extends a "Date" constructor with node-time's extensions.
@@ -127,6 +161,27 @@ if (!exports.currentTimezone) {
   }
 }
 
+if (!exports.currentTimezone && process.platform === 'win32') {
+  var curTimezoneRegKey = new Winreg({
+    hive: Winreg.HKLM,
+    key:  '\\SYSTEM\\CurrentControlSet\\Control\\TimeZoneInformation'
+  });
+
+  curTimezoneRegKey.values(function(err, items) {
+    items.every(function(item) {
+      console.log(item.name + ' ' + item.value);
+      if (item.name == 'TimeZoneKeyName') {
+        exports.currentTimezone = process.env.TZ = item.value;
+        debug('resolved initial timezone:', item.value);
+        return false;
+      }
+      return true;
+    });
+  })
+}
+
+
+
 /**
  * The user-facing 'tzset' function is a thin wrapper around the native binding to
  * 'tzset()'. This function accepts a timezone String to set the process' timezone
@@ -171,12 +226,17 @@ function listTimezones () {
     throw new Error("You must set a callback");
   }
   var cb = arguments[arguments.length - 1]
-    , subset = (arguments.length > 1 ? arguments[0] : null)
+    , subset = (arguments.length > 1 ? arguments[0] : null);
 
-  return listTimezonesFolder(subset ? subset + "/" : "", subset ? path.join(TZDIR, "/" + subset) : TZDIR, function (err, tzs) {
-    if (err) return cb(err);
+  if (process.platform === 'win32' && tzs) {
     cb(null, tzs.sort());
-  });
+  } else {
+    return listTimezonesFolder(subset ? subset + "/" : "", subset ? path.join(TZDIR, "/" + subset) : TZDIR, function (err, tzs) {
+      if (err) return cb(err);
+      cb(null, tzs.sort());
+    });
+  }
+
 }
 exports.listTimezones = listTimezones;
 
@@ -260,6 +320,11 @@ function setTimezone (timezone, relative) {
     exports.tzset(oldTz);
   }
   oldTz = null;
+
+  if (!zoneInfo.gmtOffset && process.platform === 'win32') {
+    zoneInfo.timezone = this.currentTimezone;
+    zoneInfo.gmtOffset = 1000 * 60 * 60 / 100;
+  }
 
   // If we got to here without throwing an Error, then
   // a valid timezone was requested, and we should have
